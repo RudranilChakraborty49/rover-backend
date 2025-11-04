@@ -1,63 +1,72 @@
 # main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, Any
+from sqlalchemy import create_engine, Column, Integer, String, JSON
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+import os
 
-# Create the FastAPI app
+# --- DATABASE SETUP ---
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
+
+engine = create_engine(DATABASE_URL, echo=False)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class EventLog(Base):
+    __tablename__ = "events"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(String, default=lambda: datetime.utcnow().isoformat() + "Z")
+    data = Column(JSON)  # stores your full detection dict
+
+# Create tables (safe to run multiple times)
+Base.metadata.create_all(bind=engine)
+
+# --- FASTAPI APP ---
 app = FastAPI(
-    title="Rover Security API",
-    description="Backend for hazard & person detection system",
-    version="1.0.0"
+    title="Rover Security API with DB",
+    description="Now with PostgreSQL!"
 )
 
-# Enable CORS so your React website can connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all websites (OK for now)
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # GET, POST, etc.
-    allow_headers=["*"],  # All headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# In-memory storage for events (will reset when server restarts)
-events = []
-
-# ✅ Root endpoint — shows a friendly message
-@app.get("/", summary="Health check")
+@app.get("/")
 async def root():
-    return {
-        "status": "success",
-        "message": "✅ Rover Backend is LIVE!",
-        "docs": "/docs"
-    }
+    return {"message": "✅ Backend with PostgreSQL is LIVE!"}
 
-# 📥 Endpoint: Raspberry Pi sends detection data
-@app.post("/api/rover/update", summary="Receive detection data from Pi")
-async def receive_rover_data(data: Dict[str, Any]):
-    """
-    Accepts data from Raspberry Pi in this format:
-    {
-      "person_1": {
-        "person_name": "Priyanshu Roy",
-        "is_known": true,
-        "suspicious_level": "High",
-        "detected_items": ["knife"],
-        "detected_action": "furtive"
-      }
-    }
-    """
-    timestamped_event = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "data": data
-    }
-    events.append(timestamped_event)
-    return {"status": "success", "events_received": len(data)}
+@app.post("/api/rover/update")
+async def receive_rover_data(data: dict):
+    db = SessionLocal()
+    try:
+        event = EventLog(data=data)
+        db.add(event)
+        db.commit()
+        return {"status": "success", "event_id": event.id}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+    finally:
+        db.close()
 
-# 📤 Endpoint: Website fetches historical reports
-@app.get("/api/reports", summary="Get detection history")
+@app.get("/api/reports")
 async def get_reports(limit: int = 50):
-    """
-    Returns last N events (default: 50)
-    """
-    return events[-limit:]
+    db = SessionLocal()
+    try:
+        events = db.query(EventLog).order_by(EventLog.id.desc()).limit(limit).all()
+        return [
+            {
+                "id": e.id,
+                "timestamp": e.timestamp,
+                "data": e.data
+            }
+            for e in events
+        ]
+    finally:
+        db.close()
